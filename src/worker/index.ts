@@ -238,12 +238,13 @@ function connect() {
   fitAddon.fit();
   window.addEventListener('resize', () => fitAddon.fit());
   
-  term.writeln('\\x1b[1;33m[*] Connecting to ' + user + '@' + host + ':' + port + '...\\x1b[0m');
-  const wsUrl = 'wss://' + window.location.host + '/api/ssh?host=' + encodeURIComponent(host) + '&port=' + port + '&user=' + encodeURIComponent(user) + '&pass=' + encodeURIComponent(pass);
+  term.writeln('\\x1b[1;33m[*] Connecting...\\x1b[0m');
+  const wsUrl = 'wss://' + window.location.host + '/api/ssh';
   ws = new WebSocket(wsUrl);
   ws.onopen = () => { 
-    term.writeln('\\x1b[32m[+] SSH session established\\x1b[0m'); 
-    document.getElementById('term-status').innerHTML = '<div class="w-2 h-2 bg-[#4af626]"></div> Connected';
+    term.writeln('\\x1b[32m[+] WebSocket connected, sending credentials...\\x1b[0m'); 
+    // 通过 WebSocket 消息发送凭据（不在 URL 中）
+    ws.send(JSON.stringify({ host, port: parseInt(port), username: user, password: pass }));
   };
   ws.onmessage = (e) => {
     if (typeof e.data === 'string') {
@@ -299,20 +300,8 @@ async function handleSSHConnection(request: Request, env: Env): Promise<Response
     );
   }
 
-  const url = new URL(request.url);
-  const host = url.searchParams.get('host');
-  const port = parseInt(url.searchParams.get('port') || '22');
-  const username = url.searchParams.get('user');
-  const password = url.searchParams.get('pass');
-
-  if (!host || !username || !password) {
-    return Response.json(
-      { error: 'Missing required parameters: host, user, pass' },
-      { status: 400 }
-    );
-  }
-
-  const doId = env.SSH_SESSION.idFromName(`ssh:${host}:${port}:${username}`);
+  // 不再从 URL 传递凭据，DO 会等待 WebSocket 消息
+  const doId = env.SSH_SESSION.idFromName(`session:${Date.now()}:${Math.random()}`);
   const stub = env.SSH_SESSION.get(doId);
 
   return stub.fetch(request);

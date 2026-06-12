@@ -12,6 +12,101 @@ export class SSHSessionDO {
   }
 
   async fetch(request: Request): Promise<Response> {
+    console.log('DO fetch called');
+    
+    const upgradeHeader = request.headers.get('Upgrade');
+    if (upgradeHeader !== 'websocket') {
+      return new Response('Expected WebSocket', { status: 400 });
+    }
+
+    const pair = new WebSocketPair();
+    const [client, server] = [pair[0], pair[1]];
+
+    (server as any).accept();
+
+    // 等待第一条消息获取凭据
+    this.waitForCredentials(server);
+
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    } as any);
+  }
+
+  private async waitForCredentials(ws: WebSocket): Promise<void> {
+    // 设置超时
+    const timeout = setTimeout(() => {
+      ws.send(JSON.stringify({ type: 'error', message: 'Connection timeout' }));
+      ws.close(1011, 'Timeout');
+    }, 10000);
+
+    ws.addEventListener('message', (event) => {
+      clearTimeout(timeout);
+      
+      try {
+        const config = JSON.parse(event.data as string) as SSHConnectionConfig;
+        
+        if (!config.host || !config.username || !config.password) {
+          ws.send(JSON.stringify({ type: 'error', message: 'Missing credentials' }));
+          ws.close(1011, 'Invalid credentials');
+          return;
+        }
+
+        // 移除这个监听器，后续消息由 SSHSession 处理
+        ws.removeEventListener('message', arguments.callee);
+        
+        this.initSSHSession(ws, config);
+      } catch (e) {
+        ws.send(JSON.stringify({ type: 'error', message: 'Invalid credentials format' }));
+        ws.close(1011, 'Invalid format');
+      }
+    });
+
+    ws.addEventListener('close', () => {
+      clearTimeout(timeout);
+    });
+  }
+
+  private async initSSHSession(
+    ws: WebSocket,
+    config: SSHConnectionConfig
+  ): Promise<void> {
+    try {
+      const { connect } = await import('cloudflare:sockets');
+      const socket = connect({ hostname: config.host, port: config.port });
+      
+      await socket.opened;
+      console.log('TCP connected to', config.host, config.port);
+
+      const session = new SSHSession(ws, socket, config);
+      this.sessions.set(ws, session);
+
+      ws.addEventListener('message', (event) => {
+        session.handleWebSocketMessage(event.data);
+      });
+
+      ws.addEventListener('close', () => {
+        session.close();
+        this.sessions.delete(ws);
+      });
+
+      ws.addEventListener('error', () => {
+        session.close();
+        this.sessions.delete(ws);
+      });
+
+      await session.startHandshake();
+
+    } catch (error) {
+      console.error('SSH session error:', error);
+      const errMsg = error instanceof Error ? error.message : 'Unknown error';
+      ws.send(JSON.stringify({ type: 'error', message: `连接失败: ${errMsg}` }));
+      ws.close(1011, 'SSH connection failed');
+    }
+  }
+}
+
+  async fetch(request: Request): Promise<Response> {
     console.log('DO fetch called:', request.url);
     return this.handleWebSocketUpgrade(request);
   }
