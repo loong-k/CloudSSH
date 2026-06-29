@@ -115,6 +115,7 @@ function getUserDBStub(env: Env): DurableObjectStub {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    try {
     const url = new URL(request.url);
 
     // ==================== Auth Routes ====================
@@ -139,6 +140,12 @@ export default {
 
     if (url.pathname === '/api/servers' || url.pathname.startsWith('/api/servers/')) {
       return handleServersRoute(request, url, env);
+    }
+
+    // ==================== Theme Routes (需认证) ====================
+
+    if (url.pathname === '/api/user/theme') {
+      return handleThemeRoute(request, env);
     }
 
     // ==================== Turnstile Verify ====================
@@ -230,6 +237,11 @@ export default {
         'Strict-Transport-Security': 'max-age=31536000; includeSubDomains'
       }
     });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error('Unhandled error in fetch handler:', msg);
+      return Response.json({ error: msg }, { status: 500 });
+    }
   },
 };
 
@@ -310,6 +322,36 @@ async function handleServersRoute(request: Request, url: URL, env: Env): Promise
   return Response.json({ error: 'Not Found' }, { status: 404 });
 }
 
+// ==================== Theme routes ====================
+
+async function handleThemeRoute(request: Request, env: Env): Promise<Response> {
+  const user = await getAuthenticatedUser(request, env);
+  if (!user) {
+    return Response.json({ error: 'Authentication required' }, { status: 401 });
+  }
+
+  const stub = getUserDBStub(env);
+
+  if (request.method === 'GET') {
+    return stub.fetch(new Request(`http://internal/internal/theme?user_id=${user.id}`, {
+      method: 'GET',
+    }));
+  }
+
+  if (request.method === 'PUT') {
+    const body = await request.json<Record<string, unknown>>();
+    body.user_id = user.id;
+    body.theme_data = JSON.stringify(body.theme_data);
+    return stub.fetch(new Request('http://internal/internal/theme', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }));
+  }
+
+  return Response.json({ error: 'Method not allowed' }, { status: 405 });
+}
+
 // ==================== SSH connection handlers ====================
 
 async function handleSSHConnection(request: Request, env: Env): Promise<Response> {
@@ -369,16 +411,12 @@ async function handleTokenSSHConnection(request: Request, env: Env, token: strin
 
   const config = await tokenRes.json<SSHConnectionConfig>();
 
-  // 将凭据编码后通过 URL 参数传给 SSHSessionDO（内部通信，不经过前端）
-  const configBase64 = btoa(JSON.stringify(config));
-
   const doId = env.SSH_SESSION.idFromName(`session:${Date.now()}:${Math.random()}`);
   const doStub = env.SSH_SESSION.get(doId);
 
-  // 构建新的请求 URL，附加预填充配置
   const doUrl = new URL(request.url);
   doUrl.searchParams.delete('token');
-  doUrl.searchParams.set('config', configBase64);
+  doUrl.searchParams.set('config', encodeURIComponent(JSON.stringify(config)));
 
   const doRequest = new Request(doUrl.toString(), {
     headers: request.headers,

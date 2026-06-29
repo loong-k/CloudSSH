@@ -99,7 +99,6 @@ Two Durable Objects handle state:
 Required for optional features (configured in `wrangler.toml` or Cloudflare Dashboard):
 
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` - GitHub OAuth
-- `SESSION_SECRET` - Encryption key for stored credentials
 - `TURNSTILE_SECRET` / `TURNSTILE_SITEKEY` - Bot verification
 - `BASE_URL` - OAuth callback URL
 
@@ -111,6 +110,45 @@ npm test
 ```
 
 Test files should be in `tests/` directory with `.test.ts` extension.
+
+## Git 工作流规范
+
+**禁止创建特性分支（feature branch）。** 所有变更必须直接提交到 `test` 分支，保持仓库分支结构整洁。
+
+```
+test 分支（开发/测试）  ──合并──>  main 分支（生产）
+```
+
+### 提交流程
+
+1. 切换到 `test` 分支：`git checkout test`
+2. 拉取最新代码：`git pull origin test`
+3. 进行开发并本地测试
+4. 直接提交到 `test` 分支并推送：`git push origin test`
+5. 测试通过后，维护者将 `test` 合并到 `main`
+
+### 提交信息规范
+
+遵循 Conventional Commits 格式，描述使用中文：
+
+```
+<type>: <中文描述>
+
+feat: 添加新功能
+fix: 修复某个问题
+refactor: 重构某模块
+perf: 性能优化
+docs: 文档更新
+chore: 构建/配置变更
+ci: CI/CD 变更
+```
+
+### 分支用途
+
+| 分支 | 用途 | 可直接推送 |
+|------|------|-----------|
+| `test` | 所有开发、测试、PR 合入 | ✅ |
+| `main` | 生产环境，仅通过 test 合入 | ❌（保护分支） |
 
 ## Common Pitfalls
 
@@ -163,7 +201,6 @@ npm run deploy:test     # 部署 test 环境
 
 通过 Cloudflare Dashboard 或 wrangler CLI 设置：
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` - GitHub OAuth
-- `SESSION_SECRET` - 凭据加密密钥
 - `TURNSTILE_SECRET` / `TURNSTILE_SITEKEY` - Bot 验证
 - `BASE_URL` - OAuth 回调地址（需与实际域名一致）
 

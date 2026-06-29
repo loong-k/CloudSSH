@@ -1,5 +1,11 @@
+const textEncoder = new TextEncoder();
+
 export function concat(...arrays: Uint8Array[]): Uint8Array {
-  const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
+  let totalLength = 0;
+  for (const arr of arrays) {
+    totalLength += arr.length;
+  }
+
   const result = new Uint8Array(totalLength);
   let offset = 0;
   for (const arr of arrays) {
@@ -10,22 +16,35 @@ export function concat(...arrays: Uint8Array[]): Uint8Array {
 }
 
 export function readUint32(data: Uint8Array, offset: number): number {
-  return (data[offset] << 24) | (data[offset + 1] << 16) |
-         (data[offset + 2] << 8) | data[offset + 3];
+  return (
+    (data[offset] << 24) |
+    (data[offset + 1] << 16) |
+    (data[offset + 2] << 8) |
+    data[offset + 3]
+  ) >>> 0;
+}
+
+export function writeUint32(data: Uint8Array, offset: number, value: number): void {
+  data[offset] = (value >>> 24) & 0xff;
+  data[offset + 1] = (value >>> 16) & 0xff;
+  data[offset + 2] = (value >>> 8) & 0xff;
+  data[offset + 3] = value & 0xff;
 }
 
 export function encodeUint32(value: number): Uint8Array {
   const buf = new Uint8Array(4);
-  new DataView(buf.buffer).setUint32(0, value, false);
+  writeUint32(buf, 0, value);
   return buf;
 }
 
 export function encodeString(input: string | Uint8Array): Uint8Array {
   const encoded = typeof input === 'string'
-    ? new TextEncoder().encode(input)
+    ? textEncoder.encode(input)
     : input;
-  const len = encodeUint32(encoded.length);
-  return concat(len, encoded);
+  const result = new Uint8Array(4 + encoded.length);
+  writeUint32(result, 0, encoded.length);
+  result.set(encoded, 4);
+  return result;
 }
 
 export function toSSHMPInt(bytes: Uint8Array): Uint8Array {
@@ -33,13 +52,15 @@ export function toSSHMPInt(bytes: Uint8Array): Uint8Array {
   while (start < bytes.length - 1 && bytes[start] === 0) {
     start++;
   }
-  let significant = bytes.slice(start);
+  const significant = bytes.subarray(start);
+  const needsLeadingZero = significant.length > 0 && (significant[0] & 0x80) !== 0;
+  const valueOffset = needsLeadingZero ? 5 : 4;
+  const result = new Uint8Array(valueOffset + significant.length);
 
-  if (significant[0] & 0x80) {
-    significant = concat(new Uint8Array([0]), significant);
-  }
+  writeUint32(result, 0, significant.length + (needsLeadingZero ? 1 : 0));
+  result.set(significant, valueOffset);
 
-  return encodeString(significant);
+  return result;
 }
 
 export function extractRawECDHPoint(blob: Uint8Array): Uint8Array {
@@ -54,10 +75,9 @@ export function extractRawECDHPoint(blob: Uint8Array): Uint8Array {
   const pointLen = readUint32(blob, offset);
   offset += 4;
 
-  return blob.slice(offset, offset + pointLen);
+  return blob.subarray(offset, offset + pointLen);
 }
 
 export function encodePrefixedString(str: string): Uint8Array {
-  const encoded = new TextEncoder().encode(str);
-  return concat(encodeUint32(encoded.length), encoded);
+  return encodeString(str);
 }

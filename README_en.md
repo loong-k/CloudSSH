@@ -79,7 +79,7 @@
 - **Multiple Auth Methods**: Supports standard SSH password authentication as well as Ed25519 plaintext private key authentication.
 - **MitM Protection (TOFU)**: Automatically extracts and prints the server's Host Key (SHA-256 fingerprint) on the first connection, supporting Ed25519/ECDSA/RSA signature verification.
 - **Geek Terminal Experience**: Powered by `@xterm/xterm` and the `@xterm/addon-webgl` hardware acceleration rendering engine, ensuring silky smooth scrolling even with massive log outputs.
-- **Customizable UI**: Switch seamlessly between classic terminal themes like Cyberpunk, Glacier, and Gruvbox, fully optimized for mobile devices.
+- **Customizable UI**: All colors are powered by a CSS variable system, with built-in Cyberpunk, Glacier, and Gruvbox themes switchable in one click. Supports importing custom JSON theme files (auto-synced to the cloud for logged-in users, working across browsers), with a companion [Visual Theme Editor](https://newbietan.github.io/CloudSSH/) for live color customization and export. Fully optimized for mobile devices.
 - **Native File Transfer**: Integrated with [trzsz.js](https://github.com/trzsz/trzsz.js), supporting `trz` (upload) / `tsz` (download) commands for file transfer, fully compatible with tmux sessions. Also supports drag-and-drop file upload to the terminal, directory transfer, and resumable transfers. (Requires [trzsz](https://trzsz.github.io/) installed on the remote server)
 - **GitHub OAuth Integration**: Supports GitHub login, allowing users to save and manage frequently used SSH servers for one-click connections.
 
@@ -237,7 +237,7 @@ With GitHub OAuth enabled, users can log in with their GitHub account and save/m
 
 > **Environment Variable Type Recommendation**: It is recommended to set all environment variables as **Secret** type. Secrets are stored in Cloudflare's encrypted storage, separate from code deployments, and will not be overwritten or lost during redeployments. When adding variables in the Dashboard, simply select the "Secret" type.
 
-> **Note**: Server credentials (passwords/private keys) are encrypted with AES-256-GCM before storage. The local encryption key is automatically generated and safely stored in the database (you can also manually override it by setting `SESSION_SECRET` in environment variables). During connection, credentials never pass through the frontend — they are securely transmitted via a one-time-token mechanism.
+> **Note**: Server credentials (passwords/private keys) are encrypted with AES-256-GCM before storage. The encryption key is automatically generated on first use and securely stored in the database. During connection, credentials never pass through the frontend — they are securely transmitted via a one-time-token mechanism.
 
 > **Important**: Enabling this feature for the first time requires a clean deployment (delete the old Worker first, then redeploy) to initialize the new Durable Object. Use `npx wrangler delete cloudssh` to remove the old Worker, then run `pnpm run deploy` to redeploy.
 
@@ -254,8 +254,9 @@ CloudSSH/
 │   ├── ssh/                # SSH protocol pure implementation layer
 │   └── worker/             # Worker entry and Durable Objects
 ├── frontend/               # Frontend source (independent workspace)
-│   ├── src/                # TypeScript + xterm.js + trzsz
-│   └── package.json        # Frontend dependencies
+│   └── src/                # TypeScript + xterm.js + trzsz
+├── docs/                   # GitHub Pages static assets
+│   └── theme-editor/       # Visual theme editor
 ├── scripts/                # Build scripts
 ├── pnpm-workspace.yaml     # pnpm workspace configuration
 └── wrangler.toml           # Cloudflare deployment configuration
@@ -314,21 +315,28 @@ After the dev server starts, visit the local address shown in the terminal (usua
 | `pnpm run build:frontend` | Build frontend only (output to `frontend/dist/`) |
 | `pnpm test` | Run tests |
 
-#### Submitting a PR
+#### Submitting Changes
 
-1. Create your feature branch from `test`: `git checkout -b feat/your-feature`
-2. Develop and test locally
-3. Submit a PR to the `test` branch
-4. After testing passes, the maintainer will merge the `test` branch into `main`
+**Do NOT create feature branches.** All changes must be committed directly to the `test` branch to keep the repository clean.
 
-> **Note**: The `main` branch has protection rules that prevent direct pushes and external PRs. All changes must be submitted to the `test` branch for testing first.
+```
+test branch (dev/test)  ──merge──>  main branch (production)
+```
+
+1. Switch to the `test` branch: `git checkout test`
+2. Pull the latest code: `git pull origin test`
+3. Develop and test locally
+4. Commit and push directly: `git push origin test`
+5. After testing passes, the maintainer will merge `test` into `main`
+
+> **Note**: The `main` branch has protection rules that prevent direct pushes. All changes must be committed to the `test` branch first. Do NOT create `feat/xxx`, `fix/xxx` or any other feature branches — commit directly to `test`.
 
 ### Tech Stack
 
 | Layer | Technology | Description |
 |-------|------------|-------------|
 | **Frontend** | TypeScript + Vite + xterm.js | Web terminal emulator, WebGL hardware acceleration |
-| **UI Framework** | Tailwind CSS (CDN) | Cyberpunk-style dark theme |
+| **UI Framework** | Tailwind CSS (CDN) + CSS Variable Theme System | Switchable built-in themes, custom JSON theme import with cloud sync |
 | **File Transfer** | trzsz.js | Supports trz/tsz commands, drag-and-drop upload, resumable transfers |
 | **Backend** | Cloudflare Workers | Serverless edge computing |
 | **Session Management** | Durable Objects | SSH session isolation, Hibernation API |

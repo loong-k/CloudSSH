@@ -1,4 +1,4 @@
-import { SSHConnectionConfig, SessionKeys, SSHPacket, TerminalSize } from '../types';
+import { SSHConnectionConfig, SessionKeys, SSHPacket, TerminalSize, normalizeTerminalSize } from '../types';
 import {
   SSH_MSG_KEXINIT,
   SSH_MSG_NEWKEYS,
@@ -42,9 +42,12 @@ import { Curve25519KeyExchange, Curve25519KeyPair } from '../ssh/kex-curve25519'
 import { KeyDerivation } from '../ssh/keys';
 import { SSHAESCTRCipher, SSHAESGCMCipher, SSHHMAC } from '../ssh/crypto';
 import { SSHAuth } from '../ssh/auth';
-import { SSHChannel } from '../ssh/channel';
+import { SSHChannel, type ChannelDataChunk } from '../ssh/channel';
+
+const LOCAL_WINDOW_ADJUST_THRESHOLD = 512 * 1024;
 
 export class SSHSession {
+  private readonly textEncoder = new TextEncoder();
   private ws: WebSocket;
   private socket: any;
   private config: SSHConnectionConfig;
@@ -61,7 +64,13 @@ export class SSHSession {
 
   private seqNumSend: number = 0;
   private sessionID: Uint8Array | null = null;
+  private socketWriter: WritableStreamDefaultWriter<Uint8Array> | null = null;
   private sendMutex: Promise<void> = Promise.resolve();
+  private channelDataQueue: Uint8Array[] = [];
+  private channelDataQueueHead: number = 0;
+  private channelDataQueueOffset: number = 0;
+  private channelDataFlushInProgress: boolean = false;
+  private pendingLocalWindowAdjustBytes: number = 0;
 
   private kexInitLocal: Uint8Array | null = null;
   private kexInitRemote: Uint8Array | null = null;
@@ -76,12 +85,16 @@ export class SSHSession {
   private hostKeyFingerprint: string = '';
 
   private versionRawBuffer: Uint8Array = new Uint8Array(0);
-  private negotiatedCipherC2S: string = 'aes256-gcm@openssh.com';
-  private negotiatedCipherS2C: string = 'aes256-gcm@openssh.com';
+  private negotiatedCipherC2S: string = 'aes128-gcm@openssh.com';
+  private negotiatedCipherS2C: string = 'aes128-gcm@openssh.com';
   private negotiatedMacC2S: string = 'none';
   private negotiatedMacS2C: string = 'none';
 
   private keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+  private keepaliveFailCount: number = 0;
+  private readonly maxKeepaliveFails: number = 3;
+  private keepalivePending: boolean = false;
+  private keepaliveTimeout: ReturnType<typeof setTimeout> | null = null;
   private shellReadyTimeout: ReturnType<typeof setTimeout> | null = null;
   private terminalSize: TerminalSize = { cols: 120, rows: 40 };
   private debugMode: boolean = false;
@@ -109,9 +122,7 @@ export class SSHSession {
     this.sendStatus('正在交换版本信息...');
     this.state = 'version';
 
-    const writer = this.socket.writable.getWriter();
-    await writer.write(new TextEncoder().encode('SSH-2.0-CloudSSH_1.0\r\n'));
-    writer.releaseLock();
+    await this.writeSocket(new TextEncoder().encode('SSH-2.0-CloudSSH_1.0\r\n'));
 
     this.startReading();
   }
@@ -241,9 +252,10 @@ export class SSHSession {
   }
 
   private async writeSocket(data: Uint8Array): Promise<void> {
-    const writer = this.socket.writable.getWriter();
-    await writer.write(data);
-    writer.releaseLock();
+    if (!this.socketWriter) {
+      this.socketWriter = this.socket.writable.getWriter();
+    }
+    await this.socketWriter!.write(data);
   }
 
   private async buildEncryptedPacket(payload: Uint8Array): Promise<Uint8Array> {
@@ -254,6 +266,31 @@ export class SSHSession {
     const cipher = getCipherSpec(this.negotiatedCipherC2S);
     return SSHPacketBuilder.build(
       payload,
+      cipher.blockSize,
+      (data, seq, aad) => this.encryptCipher!.encrypt(data, seq, aad),
+      this.seqNumSend++,
+      cipher.aead,
+      this.encryptMac
+        ? (packetData, seq) => this.encryptMac!.sign(packetData, seq)
+        : undefined
+    );
+  }
+
+  private async buildEncryptedChannelDataPacket(chunk: ChannelDataChunk): Promise<Uint8Array> {
+    if (!this.encryptCipher) {
+      throw new Error('Encryption not initialized');
+    }
+
+    const cipher = getCipherSpec(this.negotiatedCipherC2S);
+    return SSHPacketBuilder.buildWithPayloadWriter(
+      chunk.payloadLength,
+      (packet, offset) => this.channel.writeChannelDataPayload(
+        packet,
+        offset,
+        chunk.source,
+        chunk.sourceOffset,
+        chunk.bytesConsumed
+      ),
       cipher.blockSize,
       (data, seq, aad) => this.encryptCipher!.encrypt(data, seq, aad),
       this.seqNumSend++,
@@ -319,6 +356,16 @@ export class SSHSession {
       await this.handleGlobalRequest(packet.payload);
       return;
     }
+    if (msgType === SSH_MSG_REQUEST_SUCCESS || msgType === SSH_MSG_REQUEST_FAILURE) {
+      // Response to our global request (e.g., keepalive)
+      this.keepalivePending = false;
+      this.keepaliveFailCount = 0;
+      if (this.keepaliveTimeout) {
+        clearTimeout(this.keepaliveTimeout);
+        this.keepaliveTimeout = null;
+      }
+      return;
+    }
 
     switch (this.state) {
       case 'kex':
@@ -368,12 +415,49 @@ export class SSHSession {
   }
 
   private startKeepalive(): void {
+    this.keepaliveFailCount = 0;
+    this.keepalivePending = false;
     this.keepaliveInterval = setInterval(async () => {
+      if (this.keepalivePending) {
+        this.keepaliveFailCount++;
+        this.sendDebug(`Keepalive timeout (${this.keepaliveFailCount}/${this.maxKeepaliveFails})`);
+        if (this.keepaliveFailCount >= this.maxKeepaliveFails) {
+          this.sendError('SSH 连接超时，保活失败');
+          this.close();
+          return;
+        }
+      }
+
       try {
-        const ignoreMsg = new Uint8Array([SSH_MSG_IGNORE, 0, 0, 0, 0]);
-        await this.sendEncrypted(ignoreMsg);
+        const requestName = new TextEncoder().encode('keepalive@openssh.com');
+        const payload = new Uint8Array(1 + 4 + requestName.length + 1);
+        payload[0] = SSH_MSG_GLOBAL_REQUEST;
+        new DataView(payload.buffer).setUint32(1, requestName.length, false);
+        payload.set(requestName, 5);
+        payload[5 + requestName.length] = 1; // want_reply = true
+
+        await this.sendEncrypted(payload);
+        this.keepalivePending = true;
+
+        if (this.keepaliveTimeout) clearTimeout(this.keepaliveTimeout);
+        this.keepaliveTimeout = setTimeout(() => {
+          if (this.keepalivePending) {
+            this.keepaliveFailCount++;
+            this.sendDebug(`Keepalive response timeout (${this.keepaliveFailCount}/${this.maxKeepaliveFails})`);
+            this.keepalivePending = false;
+            if (this.keepaliveFailCount >= this.maxKeepaliveFails) {
+              this.sendError('SSH 连接超时，保活失败');
+              this.close();
+            }
+          }
+        }, 10000);
       } catch (e) {
-        this.sendDebug('Keepalive send failed: ' + (e instanceof Error ? e.message : String(e)));
+        this.keepaliveFailCount++;
+        this.sendDebug(`Keepalive send failed (${this.keepaliveFailCount}/${this.maxKeepaliveFails}): ${e instanceof Error ? e.message : String(e)}`);
+        if (this.keepaliveFailCount >= this.maxKeepaliveFails) {
+          this.sendError('SSH 连接超时，保活失败');
+          this.close();
+        }
       }
     }, 25000);
   }
@@ -884,13 +968,14 @@ export class SSHSession {
           this.sendStatus('Shell 已就绪');
         }
         const outputData = this.channel.handleChannelData(payload);
-        this.ws.send(outputData.slice().buffer as ArrayBuffer);
-        const adjustMsg = this.channel.buildWindowAdjust(outputData.length);
-        await this.sendEncrypted(adjustMsg);
+        this.ws.send(outputData);
+        this.queueLocalWindowAdjust(outputData.length);
         break;
       }
 
       case SSH_MSG_CHANNEL_WINDOW_ADJUST:
+        this.channel.handleWindowAdjust(payload);
+        void this.flushChannelDataQueue();
         break;
 
       case SSH_MSG_CHANNEL_EOF:
@@ -913,30 +998,69 @@ export class SSHSession {
 
   async handleWebSocketMessage(data: string | ArrayBuffer): Promise<void> {
     if (typeof data === 'string') {
-      if (data.startsWith('{"type"')) {
-        try {
-          const msg = JSON.parse(data);
-          if (msg.type === 'ping') {
-            this.ws.send(JSON.stringify({ type: 'pong' }));
-            return;
-          }
-          if (msg.type === 'resize') {
-            await this.handleResize(msg.cols, msg.rows);
-            return;
-          }
-        } catch {}
+      let parsed: any = undefined;
+      try {
+        parsed = JSON.parse(data);
+      } catch {}
+
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.type === 'ping') {
+          this.ws.send(JSON.stringify({ type: 'pong' }));
+          return;
+        }
+        if (parsed.type === 'resize') {
+          await this.handleResize(parsed.cols, parsed.rows);
+          return;
+        }
       }
 
       if (this.state !== 'ready') return;
       
-      const encoded = new TextEncoder().encode(data);
-      const channelData = this.channel.buildChannelData(encoded);
-      await this.sendEncrypted(channelData);
+      this.enqueueChannelData(this.textEncoder.encode(data));
     } else {
       if (this.state !== 'ready') return;
 
-      const channelData = this.channel.buildChannelData(new Uint8Array(data));
-      await this.sendEncrypted(channelData);
+      this.enqueueChannelData(new Uint8Array(data));
+    }
+  }
+
+  private enqueueChannelData(data: Uint8Array): void {
+    if (data.length === 0) return;
+
+    this.channelDataQueue.push(data);
+    void this.flushChannelDataQueue();
+  }
+
+  private async flushChannelDataQueue(): Promise<void> {
+    if (this.channelDataFlushInProgress) return;
+
+    this.channelDataFlushInProgress = true;
+    try {
+      while (this.channelDataQueueHead < this.channelDataQueue.length) {
+        const current = this.channelDataQueue[this.channelDataQueueHead];
+        const chunk = this.channel.takeChannelDataChunk(current, this.channelDataQueueOffset);
+        if (!chunk) break;
+
+        await this.sendEncryptedChannelData(chunk);
+        this.channelDataQueueOffset += chunk.bytesConsumed;
+
+        if (this.channelDataQueueOffset >= current.length) {
+          this.channelDataQueueHead++;
+          this.channelDataQueueOffset = 0;
+        }
+      }
+
+      if (this.channelDataQueueHead > 0) {
+        this.channelDataQueue = this.channelDataQueue.slice(this.channelDataQueueHead);
+        this.channelDataQueueHead = 0;
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      this.sendDebug(`flushChannelDataQueue ERROR: ${errMsg}`);
+      this.sendError('发送数据失败: ' + errMsg);
+      this.close();
+    } finally {
+      this.channelDataFlushInProgress = false;
     }
   }
 
@@ -949,41 +1073,51 @@ export class SSHSession {
   }
 
   private updateTerminalSize(cols: unknown, rows: unknown): boolean {
-    if (
-      typeof cols !== 'number' ||
-      typeof rows !== 'number' ||
-      !Number.isFinite(cols) ||
-      !Number.isFinite(rows)
-    ) {
-      return false;
-    }
+    const size = normalizeTerminalSize(cols, rows);
+    if (!size) return false;
 
-    const nextSize = {
-      cols: Math.floor(cols),
-      rows: Math.floor(rows),
-    };
-
-    if (
-      nextSize.cols < 10 ||
-      nextSize.cols > 1000 ||
-      nextSize.rows < 5 ||
-      nextSize.rows > 1000
-    ) {
-      return false;
-    }
-
-    this.terminalSize = nextSize;
+    this.terminalSize = size;
     return true;
   }
 
   private async sendEncrypted(payload: Uint8Array): Promise<void> {
+    await this.sendEncryptedPacket(() => this.buildEncryptedPacket(payload));
+  }
+
+  private async sendEncryptedChannelData(chunk: ChannelDataChunk): Promise<void> {
+    await this.sendEncryptedPacket(() => this.buildEncryptedChannelDataPacket(chunk));
+  }
+
+  private async sendEncryptedPacket(buildPacket: () => Promise<Uint8Array>): Promise<void> {
     const operation = this.sendMutex.then(async () => {
-      const encrypted = await this.buildEncryptedPacket(payload);
+      const encrypted = await buildPacket();
       await this.writeSocket(encrypted);
     });
 
     this.sendMutex = operation.then(() => {}, () => {});
     await operation;
+  }
+
+  private queueLocalWindowAdjust(bytesToAdd: number): void {
+    this.pendingLocalWindowAdjustBytes += bytesToAdd;
+    if (this.pendingLocalWindowAdjustBytes < LOCAL_WINDOW_ADJUST_THRESHOLD) {
+      return;
+    }
+
+    const adjustBytes = this.pendingLocalWindowAdjustBytes;
+    this.pendingLocalWindowAdjustBytes = 0;
+    void this.sendLocalWindowAdjust(adjustBytes);
+  }
+
+  private async sendLocalWindowAdjust(bytesToAdd: number): Promise<void> {
+    try {
+      await this.sendEncrypted(this.channel.buildWindowAdjust(bytesToAdd));
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      this.sendDebug(`sendLocalWindowAdjust ERROR: ${errMsg}`);
+      this.sendError('发送窗口调整失败: ' + errMsg);
+      this.close();
+    }
   }
 
   private sendStatus(message: string): void {
@@ -1010,10 +1144,20 @@ export class SSHSession {
       clearInterval(this.keepaliveInterval);
       this.keepaliveInterval = null;
     }
+    if (this.keepaliveTimeout) {
+      clearTimeout(this.keepaliveTimeout);
+      this.keepaliveTimeout = null;
+    }
     if (this.shellReadyTimeout) {
       clearTimeout(this.shellReadyTimeout);
       this.shellReadyTimeout = null;
     }
+    this.channelDataQueue = [];
+    this.channelDataQueueHead = 0;
+    this.channelDataQueueOffset = 0;
+    this.pendingLocalWindowAdjustBytes = 0;
+    try { this.socketWriter?.releaseLock(); } catch {}
+    this.socketWriter = null;
     try { this.socket.close(); } catch {}
     try { this.ws.close(normal ? 1000 : 1011); } catch {}
   }

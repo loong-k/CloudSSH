@@ -1,4 +1,11 @@
-import { concat, encodeUint32 } from './utils';
+import { writeUint32 } from './utils';
+
+function buildMacData(seqNum: number, packet: Uint8Array): Uint8Array {
+  const data = new Uint8Array(4 + packet.length);
+  writeUint32(data, 0, seqNum);
+  data.set(packet, 4);
+  return data;
+}
 
 export class SSHAESGCMCipher {
   private key: CryptoKey | null = null;
@@ -34,15 +41,24 @@ export class SSHAESGCMCipher {
     }
   }
 
+  private getAlgorithm(aad?: Uint8Array): Record<string, unknown> {
+    const algorithm: Record<string, unknown> = {
+      name: 'AES-GCM',
+      iv: this.iv,
+      tagLength: 128,
+    };
+    if (aad) {
+      algorithm.additionalData = aad;
+    }
+    return algorithm;
+  }
+
   async encrypt(plaintext: Uint8Array, _seqNum?: number, aad?: Uint8Array, _commit: boolean = true): Promise<Uint8Array> {
     if (!this.key) throw new Error('Cipher not initialized');
-    const nonce = new Uint8Array(this.iv);
-
-    const alg: Record<string, unknown> = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
-    if (aad) alg.additionalData = aad;
+    const algorithm = this.getAlgorithm(aad);
 
     const encrypted = new Uint8Array(
-      await crypto.subtle.encrypt(alg as unknown as SubtleCryptoEncryptAlgorithm, this.key, plaintext)
+      await crypto.subtle.encrypt(algorithm as unknown as SubtleCryptoEncryptAlgorithm, this.key, plaintext)
     );
 
     this.incIV();
@@ -51,14 +67,11 @@ export class SSHAESGCMCipher {
 
   async decrypt(ciphertext: Uint8Array, _seqNum?: number, aad?: Uint8Array, _commit: boolean = true): Promise<Uint8Array | null> {
     if (!this.key) throw new Error('Cipher not initialized');
-    const nonce = new Uint8Array(this.iv);
-
-    const alg: Record<string, unknown> = { name: 'AES-GCM', iv: nonce, tagLength: 128 };
-    if (aad) alg.additionalData = aad;
+    const algorithm = this.getAlgorithm(aad);
 
     try {
       const decrypted = new Uint8Array(
-        await crypto.subtle.decrypt(alg as unknown as SubtleCryptoEncryptAlgorithm, this.key, ciphertext)
+        await crypto.subtle.decrypt(algorithm as unknown as SubtleCryptoEncryptAlgorithm, this.key, ciphertext)
       );
       this.incIV();
       return decrypted;
@@ -93,11 +106,12 @@ export class SSHAESCTRCipher {
   }
 
   private incCounter(blocks: number): void {
-    for (let block = 0; block < blocks; block++) {
-      for (let i = 15; i >= 0; i--) {
-        this.counter[i]++;
-        if (this.counter[i] !== 0) break;
-      }
+    let carry = blocks;
+    for (let i = 15; i >= 0 && carry > 0; i--) {
+      const add = carry % 256;
+      const sum = this.counter[i] + add;
+      this.counter[i] = sum & 0xff;
+      carry = Math.floor(carry / 256) + (sum >>> 8);
     }
   }
 
@@ -173,14 +187,12 @@ export class SSHHMAC {
 
   async sign(packet: Uint8Array, seqNum: number): Promise<Uint8Array> {
     if (!this.key) throw new Error('MAC not initialized');
-    const data = concat(encodeUint32(seqNum), packet);
-    return new Uint8Array(await crypto.subtle.sign('HMAC', this.key, data));
+    return new Uint8Array(await crypto.subtle.sign('HMAC', this.key, buildMacData(seqNum, packet)));
   }
 
   async verify(packet: Uint8Array, seqNum: number, expected: Uint8Array): Promise<boolean> {
     if (!this.key) throw new Error('MAC not initialized');
-    const data = concat(encodeUint32(seqNum), packet);
-    return crypto.subtle.verify('HMAC', this.key, expected, data);
+    return crypto.subtle.verify('HMAC', this.key, expected, buildMacData(seqNum, packet));
   }
 }
 

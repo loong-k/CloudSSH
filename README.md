@@ -79,7 +79,7 @@
 - **多种认证方式**：支持标准 SSH 密码认证以及基于 Ed25519 的纯文本私钥认证。
 - **防范中间人攻击 (TOFU)**：首次连接自动提取服务器 Host Key（SHA-256 指纹）并显示，支持 Ed25519/ECDSA/RSA 签名验证。
 - **全功能极客终端**：基于 `@xterm/xterm` 与 `@xterm/addon-webgl` 硬件加速渲染引擎，保证海量日志输出顺滑不卡顿。
-- **个性化 UI**：提供 Cyberpunk、Glacier、Gruvbox 等经典终端主题一键切换，支持移动端适配。
+- **个性化 UI**：全站颜色基于 CSS 变量系统，提供 Cyberpunk、Glacier、Gruvbox 内置主题一键切换。支持导入自定义 JSON 主题文件（登录用户自动云端同步，跨浏览器生效），配套[可视化主题编辑器](https://newbietan.github.io/CloudSSH/)可在线调色并导出。支持移动端适配。
 - **原生文件传输**：集成 [trzsz.js](https://github.com/trzsz/trzsz.js)，支持 `trz`（上传）/ `tsz`（下载）命令进行文件传输，兼容 tmux 会话。还支持拖拽文件到终端窗口直接上传、目录传输及断点续传等高级功能。（需远程服务器安装 [trzsz](https://trzsz.github.io/)）
 - **GitHub OAuth 集成**：支持 GitHub 登录，用户可保存和管理常用 SSH 服务器，实现一键连接。
 
@@ -237,7 +237,7 @@ flowchart TB
 
 > **环境变量类型建议**：建议将所有环境变量都设置为 **Secret** 类型。Secrets 存储在 Cloudflare 加密存储中，与代码部署分离，重新部署时不会被覆盖或丢失。在 Dashboard 添加变量时，选择 "Secret" 类型即可。
 
-> **说明**：服务器凭据（密码/私钥）在数据库中使用 AES-256-GCM 加密存储，本地加密密钥将自动生成并安全地存储在数据库中（也可在环境变量中手动设置 `SESSION_SECRET` 来指定）。连接时凭据不经过前端，通过 one-time-token 机制安全传递。
+> **说明**：服务器凭据（密码/私钥）在数据库中使用 AES-256-GCM 加密存储，加密密钥在首次使用时自动生成并安全地存储在数据库中。连接时凭据不经过前端，通过 one-time-token 机制安全传递。
 
 > **注意**：首次启用此功能需要从零部署（删除旧 Worker 后重新部署），因为需要初始化新的 Durable Object。可通过 `npx wrangler delete cloudssh` 删除旧 Worker，然后运行 `pnpm run deploy` 重新部署。
 
@@ -254,8 +254,9 @@ CloudSSH/
 │   ├── ssh/                # SSH 协议纯实现层
 │   └── worker/             # Worker 入口和 Durable Objects
 ├── frontend/               # 前端源码 (独立 workspace)
-│   ├── src/                # TypeScript + xterm.js + trzsz
-│   └── package.json        # 前端依赖
+│   └── src/                # TypeScript + xterm.js + trzsz
+├── docs/                   # GitHub Pages 静态资源
+│   └── theme-editor/       # 可视化主题编辑器
 ├── scripts/                # 构建脚本
 ├── pnpm-workspace.yaml     # pnpm 工作区配置
 └── wrangler.toml           # Cloudflare 部署配置
@@ -314,21 +315,28 @@ pnpm run dev
 | `pnpm run build:frontend` | 仅构建前端（输出到 `frontend/dist/`） |
 | `pnpm test` | 运行测试 |
 
-#### 提交 PR 的流程
+#### 提交变更的流程
 
-1. 基于 `test` 分支创建你的特性分支：`git checkout -b feat/your-feature`
-2. 进行开发并本地测试
-3. 提交 PR 到 `test` 分支
-4. 测试通过后，维护者会将 `test` 分支合并到 `main` 分支
+**禁止创建特性分支（feature branch）。** 所有变更必须直接提交到 `test` 分支，保持仓库分支结构整洁。
 
-> **说明**：`main` 分支设置了保护规则，禁止直接推送和外部 PR。所有变更必须先提交到 `test` 分支进行测试。
+```
+test 分支（开发/测试）  ──合并──>  main 分支（生产）
+```
+
+1. 切换到 `test` 分支：`git checkout test`
+2. 拉取最新代码：`git pull origin test`
+3. 进行开发并本地测试
+4. 直接提交并推送：`git push origin test`
+5. 测试通过后，维护者会将 `test` 分支合并到 `main` 分支
+
+> **说明**：`main` 分支设置了保护规则，禁止直接推送。所有变更必须先提交到 `test` 分支进行测试。请勿创建 `feat/xxx`、`fix/xxx` 等特性分支，直接在 `test` 分支上提交即可。
 
 ### 技术栈
 
 | 层级 | 技术 | 说明 |
 |------|------|------|
 | **前端** | TypeScript + Vite + xterm.js | Web 终端模拟器，WebGL 硬件加速 |
-| **UI 框架** | Tailwind CSS (CDN) | 赛博朋克风格暗色主题 |
+| **UI 框架** | Tailwind CSS (CDN) + CSS 变量主题系统 | 可切换内置主题，支持自定义 JSON 主题导入与云端同步 |
 | **文件传输** | trzsz.js | 支持 trz/tsz 命令、拖拽上传、断点续传 |
 | **后端** | Cloudflare Workers | Serverless 边缘计算 |
 | **会话管理** | Durable Objects | SSH 会话隔离、Hibernation API |

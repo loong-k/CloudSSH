@@ -55,6 +55,28 @@ export interface TerminalSize {
   rows: number;
 }
 
+export function normalizeTerminalSize(cols: unknown, rows: unknown): TerminalSize | null {
+  if (
+    typeof cols !== 'number' ||
+    typeof rows !== 'number' ||
+    !Number.isFinite(cols) ||
+    !Number.isFinite(rows)
+  ) {
+    return null;
+  }
+
+  const size = {
+    cols: Math.floor(cols),
+    rows: Math.floor(rows),
+  };
+
+  if (size.cols < 10 || size.cols > 2000 || size.rows < 5 || size.rows > 2000) {
+    return null;
+  }
+
+  return size;
+}
+
 export interface Env {
   SSH_SESSION: DurableObjectNamespace;
   USER_DB: DurableObjectNamespace;
@@ -65,7 +87,6 @@ export interface Env {
   // GitHub OAuth（可选，未配置则登录功能自动禁用）
   GITHUB_CLIENT_ID?: string;
   GITHUB_CLIENT_SECRET?: string;
-  SESSION_SECRET?: string;
   BASE_URL?: string;
   // 主机密钥验证严格模式（默认 true，设为 false 可跳过签名验证失败）
   STRICT_HOST_KEY_VERIFY?: string;
