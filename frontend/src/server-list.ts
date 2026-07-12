@@ -1,3 +1,5 @@
+import { populateRegionSelect, regionLabel } from './regions';
+
 interface UserInfo {
   id: number;
   github_id: number;
@@ -13,6 +15,8 @@ interface ServerConfig {
   port: number;
   username: string;
   auth_method: 'password' | 'publickey';
+  region?: string | null;
+  inferred_hint?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -294,6 +298,21 @@ export class ServerList {
       } else {
         this.setModalAuthMode('password');
       }
+
+      // 区域下拉：回显用户保存的 region（"" = Auto）
+      const regionSelect = document.getElementById('server-region') as HTMLSelectElement | null;
+      const inferredInfo = document.getElementById('server-region-inferred');
+      if (regionSelect) {
+        populateRegionSelect(regionSelect, server.region || '');
+      }
+      // 显示系统推断值（仅编辑时，让用户了解 DB 持久化的 hint）
+      if (inferredInfo) {
+        if (server.inferred_hint) {
+          inferredInfo.textContent = `系统推断：${regionLabel(server.inferred_hint)}`;
+        } else {
+          inferredInfo.textContent = '';
+        }
+      }
     } else {
       // 清空表单
       (document.getElementById('server-name') as HTMLInputElement).value = '';
@@ -303,6 +322,12 @@ export class ServerList {
       (document.getElementById('server-password') as HTMLInputElement).value = '';
       (document.getElementById('server-private-key') as HTMLTextAreaElement).value = '';
       this.setModalAuthMode('password');
+
+      // 新增时：region 默认 Auto，无系统推断可显示
+      const regionSelect = document.getElementById('server-region') as HTMLSelectElement | null;
+      const inferredInfo = document.getElementById('server-region-inferred');
+      if (regionSelect) populateRegionSelect(regionSelect, '');
+      if (inferredInfo) inferredInfo.textContent = '';
     }
 
     modal.classList.remove('hidden');
@@ -369,6 +394,12 @@ export class ServerList {
       const body: any = { name, host, port, username, auth_method: authMethod };
       if (credential) body.credential = credential;
 
+      // 区域偏好：空字符串表示 Auto（让系统自动推断）
+      const regionSelect = document.getElementById('server-region') as HTMLSelectElement | null;
+      if (regionSelect) {
+        body.region = regionSelect.value || '';
+      }
+
       let res: Response;
       if (this.editingServerId) {
         res = await fetch(`/api/servers/${this.editingServerId}`, {
@@ -389,6 +420,15 @@ export class ServerList {
         throw new Error(err.error || 'Save failed');
       }
 
+      // DEBUG_MODE 时，响应中包含 _debug 字段
+      const responseData = await res.json() as any;
+      if (responseData._debug && Array.isArray(responseData._debug)) {
+        console.log('[locationHint 调试信息]');
+        responseData._debug.forEach((msg: string) => console.log(msg));
+        // 显示调试通知
+        this.showDebugNotification(responseData._debug);
+      }
+
       this.hideModal();
       await this.fetchServers();
     } catch (e) {
@@ -400,6 +440,43 @@ export class ServerList {
         ${this.editingServerId ? 'UPDATE_SERVER' : 'SAVE_SERVER'}
       `;
     }
+  }
+
+  // ==================== DEBUG 通知 ====================
+
+  private showDebugNotification(debugLines: string[]): void {
+    // 创建通知元素
+    const notification = document.createElement('div');
+    notification.className = 'fixed bottom-4 right-4 z-[200] max-w-md p-4 rounded-lg shadow-2xl border border-[var(--accent)] bg-[var(--bg-surface)] text-[var(--text)] font-mono text-[11px] leading-relaxed custom-scrollbar';
+    notification.style.maxHeight = '300px';
+    notification.style.overflowY = 'auto';
+
+    const title = document.createElement('div');
+    title.className = 'text-[var(--accent)] font-bold mb-2 text-xs';
+    title.textContent = '[locationHint 调试信息]';
+    notification.appendChild(title);
+
+    const content = document.createElement('div');
+    content.className = 'text-muted whitespace-pre-wrap';
+    content.textContent = debugLines.join('\n');
+    notification.appendChild(content);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'absolute top-2 right-2 text-muted hover:text-[var(--accent)] cursor-pointer';
+    closeBtn.innerHTML = '<span class="material-symbols-outlined" style="font-size: 16px;">close</span>';
+    closeBtn.onclick = () => notification.remove();
+    notification.appendChild(closeBtn);
+
+    document.body.appendChild(notification);
+
+    // 8 秒后自动消失
+    setTimeout(() => {
+      if (notification.parentNode) {
+        notification.style.transition = 'opacity 0.3s';
+        notification.style.opacity = '0';
+        setTimeout(() => notification.remove(), 300);
+      }
+    }, 8000);
   }
 
   // ==================== 退出登录 ====================
